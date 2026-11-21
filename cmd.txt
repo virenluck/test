@@ -1,0 +1,7 @@
+
+http://127.0.0.1:8000/docs ==for pass parameter typing for post
+pip install fastapi uvicorn
+
+python -m pip install fastapi uvicorn
+
+do not direct run file   use command (python -m uvicorn main:app --reload)
