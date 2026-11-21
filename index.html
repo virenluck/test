@@ -1,0 +1,195 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python FastAPI - User Management</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f7fb;
+            color: #333;
+        }
+
+        header {
+            background: #009688;
+            color: white;
+            text-align: center;
+            padding: 30px 15px;
+        }
+
+        header h1 {
+            margin-bottom: 10px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 30px auto;
+            padding: 20px;
+        }
+
+        .card {
+            background: white;
+            padding: 22px;
+            margin-bottom: 20px;
+            border-radius: 10px;
+            box-shadow: 0 3px 12px #00000010;
+        }
+
+        h2 {
+            color: #009688;
+            margin-bottom: 15px;
+        }
+
+        .endpoint {
+            padding: 12px;
+            margin: 10px 0;
+            background: #f0f5f5;
+            border-left: 5px solid #009688;
+            border-radius: 5px;
+        }
+
+        .method {
+            font-weight: bold;
+            color: #009688;
+            margin-right: 10px;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 8px 0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        button {
+            background: #009688;
+            color: white;
+            padding: 11px 18px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+
+        button:hover {
+            background: #00796b;
+        }
+
+        pre {
+            background: #202c39;
+            color: #00e6b8;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+            overflow-x: auto;
+        }
+
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: #777;
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <h1>Python FastAPI</h1>
+    <p>User Management REST API</p>
+    <p>Built with Python and FastAPI</p>
+</header>
+
+<div class="container">
+
+    <div class="card">
+        <h2>Welcome to Python API</h2>
+        <p>This project demonstrates REST API operations using FastAPI.</p>
+    </div>
+
+    <div class="card">
+        <h2>API Endpoints</h2>
+
+        <div class="endpoint">
+            <span class="method">GET</span> /
+            <p>Welcome message</p>
+        </div>
+
+        <div class="endpoint">
+            <span class="method">GET</span> /users
+            <p>Get all users</p>
+        </div>
+
+        <div class="endpoint">
+            <span class="method">GET</span> /users/{user_id}
+            <p>Get user by ID</p>
+        </div>
+
+        <div class="endpoint">
+            <span class="method">POST</span> /users
+            <p>Create a new user</p>
+        </div>
+
+        <div class="endpoint">
+            <span class="method">DELETE</span> /users/{user_id}
+            <p>Delete user by ID</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Try API - View Users</h2>
+        <button onclick="getUsers()">Get All Users</button>
+        <pre id="output">API response will appear here...</pre>
+    </div>
+
+    <div class="card">
+        <h2>Project Information</h2>
+        <p><b>Technology:</b> Python</p>
+        <p><b>Framework:</b> FastAPI</p>
+        <p><b>API Type:</b> REST API</p>
+        <p><b>Operations:</b> GET, POST, DELETE</p>
+        <p><b>Data:</b> JSON</p>
+    </div>
+
+</div>
+
+<footer>
+    <p>© 2026 Python FastAPI Project | Hosted on GitHub Pages</p>
+</footer>
+
+<script>
+    // Replace with your deployed FastAPI backend URL
+    const API_URL = "https://your-fastapi-backend-url.com";
+
+    async function getUsers() {
+        const output = document.getElementById("output");
+
+        try {
+            const response = await fetch(`${API_URL}/users`);
+
+            if (!response.ok) {
+                throw new Error("API request failed");
+            }
+
+            const data = await response.json();
+
+            output.textContent = JSON.stringify(data, null, 4);
+        } catch (error) {
+            output.textContent =
+                "Unable to connect to API. Please deploy your FastAPI backend and update API_URL.";
+        }
+    }
+</script>
+
+</body>
+</html>
