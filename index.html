@@ -168,27 +168,7 @@
 </footer>
 
 <script>
-    // Replace with your deployed FastAPI backend URL
-    const API_URL = "https://your-fastapi-backend-url.com";
-
-    async function getUsers() {
-        const output = document.getElementById("output");
-
-        try {
-            const response = await fetch(`${API_URL}/users`);
-
-            if (!response.ok) {
-                throw new Error("API request failed");
-            }
-
-            const data = await response.json();
-
-            output.textContent = JSON.stringify(data, null, 4);
-        } catch (error) {
-            output.textContent =
-                "Unable to connect to API. Please deploy your FastAPI backend and update API_URL.";
-        }
-    }
+  'Hi...Nishant'
 </script>
 
 </body>
