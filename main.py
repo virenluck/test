@@ -1,7 +1,7 @@
 import hashlib
 import hmac
+import json
 import os
-import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -10,11 +10,10 @@ from typing import Any
 
 import pandas as pd
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- Configuration ---
-SYMBOL = os.getenv("DELTA_SYMBOL", "BTCUSD")
 RESOLUTION = os.getenv("DELTA_RESOLUTION", "5m")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
 ATR_MULTIPLIER = float(os.getenv("ATR_MULTIPLIER", "1.5"))
@@ -24,42 +23,77 @@ DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
 DELTA_API_KEY = os.getenv("DELTA_API_KEY", "")
 DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
-# Static password for protecting FastAPI endpoints
-API_PASSWORD = os.getenv("API_PASSWORD", "313131")
+API_PWD = "a1a1a1"
+EXCEL_FILE = "data_Log.xlsx"
 
-EXCEL_FILE = "BTC_Trading_Log.xlsx"
-EXCEL_SHEET = "Trading_Log"
+# Keyname -> Delta symbol mapping (can be overridden with DELTA_SYMBOLS_MAP JSON env var)
+DEFAULT_KEY_SYMBOLS: dict[str, str] = {
+    "btc": os.getenv("BTC_SYMBOL", "BTCUSD"),
+    "gold": os.getenv("GOLD_SYMBOL", "XAUTUSD"),
+    "silver": os.getenv("SILVER_SYMBOL", "SILVONUSD"),
+}
 
-latest_data: dict[str, Any] = {}
+_raw_map = os.getenv("DELTA_SYMBOLS_MAP", "").strip()
+if _raw_map:
+    try:
+        parsed_map = json.loads(_raw_map)
+        if isinstance(parsed_map, dict) and parsed_map:
+            KEY_TO_SYMBOL: dict[str, str] = {
+                str(k).strip().lower(): str(v).strip().upper()
+                for k, v in parsed_map.items()
+                if str(k).strip() and str(v).strip()
+            }
+        else:
+            KEY_TO_SYMBOL = DEFAULT_KEY_SYMBOLS.copy()
+    except json.JSONDecodeError:
+        KEY_TO_SYMBOL = DEFAULT_KEY_SYMBOLS.copy()
+else:
+    KEY_TO_SYMBOL = DEFAULT_KEY_SYMBOLS.copy()
+
+SHEET_NAMES: dict[str, str] = {
+    "btc": "BTC",
+    "gold": "Gold",
+    "silver": "Silver",
+}
+
+latest_data_by_key: dict[str, dict[str, Any]] = {}
 data_lock = Lock()
 excel_lock = Lock()
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_pwd(pwd: str) -> None:
+    """Allow API response only when pwd equals 'a1a1a1'."""
+    if pwd != API_PWD:
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid or missing pwd.")
 
 
-# --- Endpoint Password Dependency ---
-def verify_static_password(
-    request: Request,
-    x_api_key: str | None = Depends(api_key_header),
-) -> None:
-    if not API_PASSWORD:
+def resolve_keyname(keyname: str | None) -> tuple[str, str]:
+    """Normalize a requested keyname or symbol into (canonical_key, delta_symbol)."""
+    if not keyname or not keyname.strip():
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Server authentication password is not configured.",
+            status_code=400,
+            detail=f"Query parameter 'keyname' is required. Supported keys: {sorted(KEY_TO_SYMBOL.keys())}",
         )
 
-    provided_password = x_api_key
-    if not provided_password:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            provided_password = auth_header[7:].strip()
+    cleaned = keyname.strip().lower()
+    if cleaned in KEY_TO_SYMBOL:
+        return cleaned, KEY_TO_SYMBOL[cleaned]
 
-    if not provided_password or not secrets.compare_digest(provided_password, API_PASSWORD):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API password.",
-            headers={"WWW-Authenticate": "APIKey"},
-        )
+    for k, sym in KEY_TO_SYMBOL.items():
+        if sym.lower() == cleaned:
+            return k, sym
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unknown keyname '{keyname}'. Supported keys: {sorted(KEY_TO_SYMBOL.keys())}",
+    )
+
+
+def get_sheet_name(key: str) -> str:
+    if key in SHEET_NAMES:
+        return SHEET_NAMES[key]
+    safe = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in key)
+    return (safe or "DataLog")[:31]
 
 
 # --- Delta Exchange India API Helpers ---
@@ -96,11 +130,11 @@ def delta_private_get(path: str, params: dict[str, Any] | None = None) -> Any:
     response.raise_for_status()
     data = response.json()
     if isinstance(data, dict) and data.get("success") is False:
-        raise RuntimeError(f"Delta API error: {data.get('error', data)}")
+        raise RuntimeError(f"API error: {data.get('error', data)}")
     return data.get("result", data)
 
 
-def fetch_candles(symbol: str = SYMBOL, resolution: str = RESOLUTION) -> list[dict[str, float]]:
+def fetch_candles(symbol: str, resolution: str = RESOLUTION) -> list[dict[str, float]]:
     end_ts = int(datetime.utcnow().timestamp())
     start_ts = int((datetime.utcnow() - timedelta(hours=CANDLE_LOOKBACK_HOURS)).timestamp())
 
@@ -133,7 +167,7 @@ def fetch_candles(symbol: str = SYMBOL, resolution: str = RESOLUTION) -> list[di
     return normalized
 
 
-def get_ticker(symbol: str = SYMBOL) -> dict[str, Any]:
+def get_ticker(symbol: str) -> dict[str, Any]:
     url = f"{DELTA_BASE_URL}/v2/tickers/{symbol}"
     response = requests.get(url, timeout=10)
     response.raise_for_status()
@@ -228,7 +262,7 @@ def vwap(candles: list[dict[str, float]]) -> float | None:
 
 
 # --- Signal Analysis ---
-def analyze(candles: list[dict[str, float]]) -> dict[str, Any] | None:
+def analyze(candles: list[dict[str, float]], key: str, symbol: str) -> dict[str, Any] | None:
     if len(candles) < 60:
         return None
 
@@ -349,9 +383,10 @@ def analyze(candles: list[dict[str, float]]) -> dict[str, Any] | None:
             targets = [price - risk, price - risk * 2, price - risk * 3]
 
     return {
+        "keyname": key,
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "candle_time": candles[-1]["time"],
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "current_price": price,
         "trade": direction,
         "entry": entry if direction != "NO TRADE" else None,
@@ -374,8 +409,10 @@ def analyze(candles: list[dict[str, float]]) -> dict[str, Any] | None:
 
 
 # --- Excel Persistence ---
-def save_to_excel(data: dict[str, Any]) -> None:
+def save_to_excel(key: str, data: dict[str, Any]) -> None:
+    sheet_name = get_sheet_name(key)
     columns = [
+        "keyname",
         "datetime",
         "candle_time",
         "symbol",
@@ -409,10 +446,10 @@ def save_to_excel(data: dict[str, Any]) -> None:
                 mode="a",
                 if_sheet_exists="overlay",
             ) as writer:
-                startrow = writer.sheets[EXCEL_SHEET].max_row if EXCEL_SHEET in writer.sheets else 0
+                startrow = writer.sheets[sheet_name].max_row if sheet_name in writer.sheets else 0
                 row.to_excel(
                     writer,
-                    sheet_name=EXCEL_SHEET,
+                    sheet_name=sheet_name,
                     index=False,
                     header=(startrow == 0),
                     startrow=startrow,
@@ -420,44 +457,44 @@ def save_to_excel(data: dict[str, Any]) -> None:
         else:
             row.to_excel(
                 EXCEL_FILE,
-                sheet_name=EXCEL_SHEET,
+                sheet_name=sheet_name,
                 index=False,
             )
 
 
 # --- Background Monitor ---
 def market_monitor() -> None:
-    global latest_data
-    last_candle: int | None = None
+    last_candle_by_key: dict[str, int] = {}
 
     while True:
-        try:
-            candles = fetch_candles()
-            if len(candles) < 60:
-                time.sleep(POLL_SECONDS)
-                continue
+        for key, symbol in KEY_TO_SYMBOL.items():
+            try:
+                candles = fetch_candles(symbol=symbol, resolution=RESOLUTION)
+                if len(candles) < 60:
+                    continue
 
-            candle_time = candles[-1]["time"]
-            if candle_time == last_candle:
-                time.sleep(POLL_SECONDS)
-                continue
+                candle_time = int(candles[-1]["time"])
+                if last_candle_by_key.get(key) == candle_time:
+                    continue
 
-            last_candle = candle_time
-            signal = analyze(candles)
+                last_candle_by_key[key] = candle_time
+                signal = analyze(candles, key=key, symbol=symbol)
 
-            if signal:
-                with data_lock:
-                    latest_data = signal.copy()
+                if signal:
+                    with data_lock:
+                        latest_data_by_key[key] = signal.copy()
 
-                save_to_excel(signal)
-                print(
-                    signal["datetime"],
-                    signal["current_price"],
-                    signal["trade"],
-                    signal["detail"],
-                )
-        except Exception as error:
-            print("Monitor error:", error)
+                    save_to_excel(key, signal)
+                    print(
+                        f"[{key.upper()}]",
+                        signal["datetime"],
+                        signal["symbol"],
+                        signal["current_price"],
+                        signal["trade"],
+                        signal["detail"],
+                    )
+            except Exception as error:
+                print(f"Monitor error [{key}:{symbol}]:", error)
 
         time.sleep(POLL_SECONDS)
 
@@ -470,71 +507,92 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Test API",
-    version="1.0",
+    title="Test Indic Multi-Key API",
+    version="2.0",
     lifespan=lifespan,
-    dependencies=[Depends(verify_static_password)],
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
 # --- Endpoints ---
 @app.get("/")
-def home() -> dict[str, Any]:
+def home(pwd: str = Query(...), keyname: str | None = Query(default=None)) -> dict[str, Any]:
+    verify_pwd(pwd)
+    if keyname is not None:
+        key, symbol = resolve_keyname(keyname)
+        return {
+            "status": "running",
+            "exchange": "Test Data",
+            "keyname": key,
+            "symbol": symbol,
+            "message": "API is active",
+        }
+
     return {
         "status": "running",
-        "exchange": "Delta Exchange India",
-        "symbol": SYMBOL,
-        "message": "BTC scalping API is active",
+        "exchange": "Test Data",
+        "keys": KEY_TO_SYMBOL,
+        "message": "API is active. Pass ?keyname=btc|gold|silver&pwd=a1a1a1 to endpoints.",
     }
 
 
 @app.get("/current")
-def market() -> dict[str, Any]:
+def currentdata(pwd: str = Query(...), keyname: str = Query(...)) -> dict[str, Any]:
+    verify_pwd(pwd)
+    key, symbol = resolve_keyname(keyname)
     try:
-        ticker = get_ticker()
+        ticker = get_ticker(symbol)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch ticker: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Failed to fetch ticker for '{key}' ({symbol}): {exc}") from exc
 
     return {
-        "symbol": SYMBOL,
+        "keyname": key,
+        "symbol": symbol,
         "current_price": ticker.get("close", ticker.get("mark_price")),
     }
 
 
-@app.get("/check")
-def get_signal() -> dict[str, Any]:
+@app.get("/checkdata")
+def get_checkdata(pwd: str = Query(...), keyname: str = Query(...)) -> dict[str, Any]:
+    verify_pwd(pwd)
+    key, symbol = resolve_keyname(keyname)
     with data_lock:
-        if not latest_data:
+        item = latest_data_by_key.get(key)
+        if not item:
             return {
                 "status": "waiting",
-                "message": "Market analysis not available yet",
+                "keyname": key,
+                "symbol": symbol,
+                "message": f"Analysis not available yet for '{key}' ({symbol})",
             }
-        return latest_data.copy()
+        return item.copy()
 
 
 @app.get("/details")
-def history(limit: int = 50) -> dict[str, Any]:
+def details(pwd: str = Query(...), keyname: str = Query(...), limit: int = 50) -> dict[str, Any]:
+    verify_pwd(pwd)
+    key, symbol = resolve_keyname(keyname)
+    sheet_name = get_sheet_name(key)
+
     if not os.path.exists(EXCEL_FILE):
-        return {"records": []}
+        return {"keyname": key, "symbol": symbol, "records": []}
 
     with excel_lock:
-        df = pd.read_excel(EXCEL_FILE, sheet_name=EXCEL_SHEET)
+        try:
+            df = pd.read_excel(EXCEL_FILE, sheet_name=sheet_name)
+        except ValueError:
+            return {"keyname": key, "symbol": symbol, "records": []}
 
     bounded_limit = max(1, min(limit, 1000))
-    return {"records": df.tail(bounded_limit).to_dict(orient="records")}
-
-
-# @app.get("/account/balance")
-# def account_balance() -> Any:
-#     try:
-#         return get_balances()
-#     except Exception as exc:
-#         raise HTTPException(status_code=502, detail=f"Failed to fetch balance: {exc}") from exc
-
-
-# @app.get("/account/positions")
-# def account_positions() -> Any:
-#     try:
-#         return get_positions()
-#     except Exception as exc:
-#         raise HTTPException(status_code=502, detail=f"Failed to fetch positions: {exc}") from exc
+    return {
+        "keyname": key,
+        "symbol": symbol,
+        "records": df.tail(bounded_limit).to_dict(orient="records"),
+    }
