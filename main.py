@@ -10,8 +10,9 @@ from typing import Any
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # --- Configuration ---
 RESOLUTION = os.getenv("DELTA_RESOLUTION", "5m")
@@ -23,8 +24,16 @@ DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
 DELTA_API_KEY = os.getenv("DELTA_API_KEY", "")
 DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
-API_PWD = "a1a1a1"
-EXCEL_FILE = "data_Log.xlsx"
+API_PWD = os.getenv("API_PWD", "a1a1a1")
+EXCEL_FILE = os.getenv("EXCEL_FILE", "data_Log.xlsx")
+
+_raw_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+if not _raw_cors_origins or _raw_cors_origins == "*":
+    CORS_ALLOW_ORIGINS: list[str] = ["*"]
+else:
+    CORS_ALLOW_ORIGINS = [
+        origin.strip() for origin in _raw_cors_origins.split(",") if origin.strip()
+    ] or ["*"]
 
 # Keyname -> Delta symbol mapping (can be overridden with DELTA_SYMBOLS_MAP JSON env var)
 DEFAULT_KEY_SYMBOLS: dict[str, str] = {
@@ -512,13 +521,52 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Registered as outer middleware so CORS headers apply to responses and HTTPExceptions
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin")
+    headers: dict[str, str] = {
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+    if CORS_ALLOW_ORIGINS == ["*"]:
+        headers["Access-Control-Allow-Origin"] = "*"
+    elif origin and origin in CORS_ALLOW_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Vary"] = "Origin"
+    return headers
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=_cors_headers_for_request(request),
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+        headers=_cors_headers_for_request(request),
+    )
+
+
+@app.options("/")
+@app.options("/current")
+@app.options("/checkdata")
+@app.options("/details")
+def preflight_options(request: Request) -> Response:
+    return Response(status_code=204, headers=_cors_headers_for_request(request))
 
 
 # --- Endpoints ---
